@@ -198,19 +198,31 @@ class HtmlCleanerParser(HTMLParser):
                 if name == "href":
                     href = value
                     break
+            # Check if anchor has bold styling
+            is_bold = self._has_bold_style(attrs)
             # Skip special URLs - leave them inline
             skip_patterns = ["mailto", "disclosure", "privacy"]
             if href and any(pattern in href.lower() for pattern in skip_patterns):
                 # Output as regular anchor tag with href
-                self.output.append('<a href="{}">'.format(href))
+                if is_bold:
+                    self.output.append('<b><a href="{}">'.format(href))
+                else:
+                    self.output.append('<a href="{}">'.format(href))
                 self.inline_anchor_depth += 1
+                if is_bold:
+                    self.bold_tag_stack.append("a")
                 return
             if href:
                 # Add to unique links list
                 if href not in self.link_set:
                     self.link_set.add(href)
                     self.links.append(href)
-            self.output.append("[link]")
+            # Output [link] with bold wrapper if needed
+            if is_bold:
+                self.output.append("<b>[link]")
+                self.bold_tag_stack.append("a")
+            else:
+                self.output.append("[link]")
             return
 
         # Filter attributes
@@ -300,12 +312,22 @@ class HtmlCleanerParser(HTMLParser):
         if tag in self.config["keep_tags"]:
             # Handle anchor tags specially
             if tag == "a":
+                # Check if this anchor was bold styled
+                is_bold_anchor = self.bold_tag_stack and self.bold_tag_stack[-1] == "a"
                 if self.inline_anchor_depth > 0:
                     # This is an inline anchor (mailto, disclosure, privacy)
-                    self.output.append("</a>")
+                    if is_bold_anchor:
+                        self.output.append("</a></b>")
+                        self.bold_tag_stack.pop()
+                    else:
+                        self.output.append("</a>")
                     self.inline_anchor_depth -= 1
                 else:
-                    self.output.append("[/link]")
+                    if is_bold_anchor:
+                        self.output.append("[/link]</b>")
+                        self.bold_tag_stack.pop()
+                    else:
+                        self.output.append("[/link]")
                 return
             # Close </b> before closing tag if it was bold styled
             if self.bold_tag_stack and self.bold_tag_stack[-1] == tag:
@@ -476,11 +498,21 @@ def clean_html(html, config):
     # Remove whitespace/newlines immediately after opening <p> and before closing </p>
     result = re.sub(r'<p>\s+', '<p>', result)
     result = re.sub(r'\s+</p>', '</p>', result)
-    # Remove any remaining empty <p> tags (including ones with only whitespace or &nbsp;)
+    # Remove <br> at the start of paragraphs
+    result = re.sub(r'<p><br\s*/?>', '<p>', result)
+    # Remove nested/redundant <p> tags
+    for _ in range(3):  # Multiple passes for deeply nested
+        result = re.sub(r'<p>\s*<p>', '<p>', result)
+        result = re.sub(r'</p>\s*</p>', '</p>', result)
+    # Remove any remaining empty <p> tags (including ones with only whitespace, &nbsp;, or thin spaces)
     result = re.sub(r'<p>\s*</p>\n*', '', result)
-    result = re.sub(r'<p>(\s*&nbsp;\s*)*</p>\n*', '', result)
-    # Remove dangling <p> tags at the start (no content before next tag or end)
+    result = re.sub(r'<p>(\s|&nbsp;|&#8202;)*</p>\n*', '', result)
+    # Remove dangling <p> and </p> tags on their own lines
     result = re.sub(r'^<p>\s*\n', '', result)
+    result = re.sub(r'\n\s*</p>\s*\n', '\n', result)
+    result = re.sub(r'^\s*</p>\s*\n', '', result)
+    # Add blank line between consecutive paragraphs
+    result = re.sub(r'(</p>)\n(<p>)', r'\1\n\n\2', result)
     result = result.strip()
 
     # Build header with title, pretexts and links
