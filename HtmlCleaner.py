@@ -81,6 +81,52 @@ class HtmlCleanerParser(HTMLParser):
         self.config = config
         self.output = []
         self.skip_depth = 0  # Track depth when inside removed tags
+        self.pretext_depth = 0  # Track depth when inside hidden pretext
+        self.pretext_content = []  # Collect pretext content temporarily
+        self.pretexts = []  # Store all found pretexts
+        self.bold_tag_stack = []  # Track tags that have font-weight: bold
+
+    def _is_hidden_pretext(self, attrs):
+        """Check if element has CSS indicating hidden pretext."""
+        for name, value in attrs:
+            if name == "style" and value:
+                style_lower = value.lower()
+                # Check for common hidden element patterns
+                if any(pattern in style_lower for pattern in [
+                    "display: none", "display:none",
+                    "visibility: hidden", "visibility:hidden",
+                    "mso-hide: all", "mso-hide:all",
+                    "max-height: 0", "max-height:0",
+                    "opacity: 0", "opacity:0",
+                ]):
+                    return True
+        return False
+
+    def _has_bold_style(self, attrs):
+        """Check if element has font-weight: bold in style."""
+        for name, value in attrs:
+            if name == "style" and value:
+                style_lower = value.lower()
+                if "font-weight: bold" in style_lower or "font-weight:bold" in style_lower:
+                    return True
+        return False
+
+    def _is_tracking_pixel(self, attrs):
+        """Check if img is a 1x1 tracking pixel."""
+        width_1 = False
+        height_1 = False
+        for name, value in attrs:
+            if name == "width" and value in ["1", "1px"]:
+                width_1 = True
+            elif name == "height" and value in ["1", "1px"]:
+                height_1 = True
+            elif name == "style" and value:
+                style_lower = value.lower()
+                if re.search(r'width:\s*1px', style_lower):
+                    width_1 = True
+                if re.search(r'height:\s*1px', style_lower):
+                    height_1 = True
+        return width_1 and height_1
 
     def handle_starttag(self, tag, attrs):
         # Check if we're inside a tag being removed entirely
@@ -94,6 +140,14 @@ class HtmlCleanerParser(HTMLParser):
             self.skip_depth = 1
             return
 
+        # Check for hidden pretext
+        if self.pretext_depth > 0:
+            self.pretext_depth += 1
+            return
+        if self._is_hidden_pretext(attrs):
+            self.pretext_depth = 1
+            return
+
         # Handle table conversion
         if self.config["convert_tables_to_paragraphs"]:
             if tag in ["table", "thead", "tbody", "tfoot", "tr"]:
@@ -105,6 +159,10 @@ class HtmlCleanerParser(HTMLParser):
         # Handle span removal
         if tag == "span" and self.config["remove_span_tags"]:
             return  # Don't output span, content will still come through
+
+        # Remove 1x1 tracking pixel images
+        if tag == "img" and self._is_tracking_pixel(attrs):
+            return
 
         # Convert b/i to strong/em
         if self.config["convert_b_to_strong"]:
@@ -120,6 +178,11 @@ class HtmlCleanerParser(HTMLParser):
         # Filter attributes
         filtered_attrs = self._filter_attributes(tag, attrs)
 
+        # Check if this tag has bold styling
+        is_bold = self._has_bold_style(attrs)
+        if is_bold:
+            self.bold_tag_stack.append(tag)
+
         # Build tag string
         self_closing = tag in ["img", "br", "hr"]
         if filtered_attrs:
@@ -134,6 +197,10 @@ class HtmlCleanerParser(HTMLParser):
             else:
                 self.output.append("<{}>".format(tag))
 
+        # Add <b> after opening tag if bold styled
+        if is_bold and not self_closing:
+            self.output.append("<b>")
+
     def handle_startendtag(self, tag, attrs):
         # Handle self-closing tags like <img ... /> or <br />
         self.handle_starttag(tag, attrs)
@@ -143,6 +210,21 @@ class HtmlCleanerParser(HTMLParser):
         if self.skip_depth > 0:
             if tag in self.config["remove_with_content"]:
                 self.skip_depth -= 1
+            return
+
+        # Handle pretext depth
+        if self.pretext_depth > 0:
+            self.pretext_depth -= 1
+            if self.pretext_depth == 0:
+                # Store collected pretext for output at top
+                pretext = "".join(self.pretext_content).strip()
+                # Strip &nbsp; from beginning and end
+                pretext = re.sub(r'^(\s*&nbsp;\s*)+', '', pretext)
+                pretext = re.sub(r'(\s*&nbsp;\s*)+$', '', pretext)
+                pretext = pretext.strip()
+                if pretext:
+                    self.pretexts.append(pretext)
+                self.pretext_content = []
             return
 
         # Handle table conversion
@@ -166,20 +248,33 @@ class HtmlCleanerParser(HTMLParser):
 
         # Only output end tag if we're keeping this tag
         if tag in self.config["keep_tags"]:
+            # Close </b> before closing tag if it was bold styled
+            if self.bold_tag_stack and self.bold_tag_stack[-1] == tag:
+                self.output.append("</b>")
+                self.bold_tag_stack.pop()
             self.output.append("</{}>".format(tag))
 
     def handle_data(self, data):
         if self.skip_depth > 0:
+            return
+        if self.pretext_depth > 0:
+            self.pretext_content.append(data)
             return
         self.output.append(data)
 
     def handle_entityref(self, name):
         if self.skip_depth > 0:
             return
+        if self.pretext_depth > 0:
+            self.pretext_content.append("&{};".format(name))
+            return
         self.output.append("&{};".format(name))
 
     def handle_charref(self, name):
         if self.skip_depth > 0:
+            return
+        if self.pretext_depth > 0:
+            self.pretext_content.append("&#{};".format(name))
             return
         self.output.append("&#{};".format(name))
 
@@ -218,6 +313,9 @@ class HtmlCleanerParser(HTMLParser):
     def get_output(self):
         return "".join(self.output)
 
+    def get_pretexts(self):
+        return self.pretexts
+
 
 def convert_cells_to_paragraphs(html):
     """Convert table cell markers to paragraph tags, avoiding duplicates."""
@@ -242,6 +340,7 @@ def clean_html(html, config):
     try:
         parser.feed(html)
         result = parser.get_output()
+        pretexts = parser.get_pretexts()
     except Exception as e:
         sublime.error_message("HTML Cleaner: Parse error - {}".format(e))
         return html
@@ -284,7 +383,14 @@ def clean_html(html, config):
         result = re.sub(r'>\s+', '> ', result)
         result = re.sub(r'\s+<', ' <', result)
 
-    return result.strip()
+    result = result.strip()
+
+    # Prepend pretexts at the very top with blank lines after
+    if pretexts:
+        pretext_block = "\n".join("Pretext: {}".format(p) for p in pretexts)
+        result = pretext_block + "\n\n\n" + result
+
+    return result
 
 
 # =============================================================================
