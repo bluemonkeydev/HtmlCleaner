@@ -90,6 +90,7 @@ class HtmlCleanerParser(HTMLParser):
         self.title = None  # Store document title
         self.in_title = False  # Track if we're inside a title tag
         self.title_content = []  # Collect title content
+        self.inline_anchor_depth = 0  # Track inline anchors (mailto, disclosure, privacy)
 
     def _is_hidden_pretext(self, attrs):
         """Check if element has CSS indicating hidden pretext."""
@@ -166,6 +167,11 @@ class HtmlCleanerParser(HTMLParser):
                 self.output.append("<!--CELL_START-->")
                 return
 
+        # Convert div to paragraph
+        if tag == "div":
+            self.output.append("<!--DIV_START-->")
+            return
+
         # Handle span removal
         if tag == "span" and self.config["remove_span_tags"]:
             return  # Don't output span, content will still come through
@@ -192,6 +198,13 @@ class HtmlCleanerParser(HTMLParser):
                 if name == "href":
                     href = value
                     break
+            # Skip special URLs - leave them inline
+            skip_patterns = ["mailto", "disclosure", "privacy"]
+            if href and any(pattern in href.lower() for pattern in skip_patterns):
+                # Output as regular anchor tag with href
+                self.output.append('<a href="{}">'.format(href))
+                self.inline_anchor_depth += 1
+                return
             if href:
                 # Add to unique links list
                 if href not in self.link_set:
@@ -267,6 +280,11 @@ class HtmlCleanerParser(HTMLParser):
                 self.output.append("<!--CELL_END-->")
                 return
 
+        # Convert div to paragraph
+        if tag == "div":
+            self.output.append("<!--DIV_END-->")
+            return
+
         # Handle span removal
         if tag == "span" and self.config["remove_span_tags"]:
             return
@@ -282,7 +300,12 @@ class HtmlCleanerParser(HTMLParser):
         if tag in self.config["keep_tags"]:
             # Handle anchor tags specially
             if tag == "a":
-                self.output.append("[/link]")
+                if self.inline_anchor_depth > 0:
+                    # This is an inline anchor (mailto, disclosure, privacy)
+                    self.output.append("</a>")
+                    self.inline_anchor_depth -= 1
+                else:
+                    self.output.append("[/link]")
                 return
             # Close </b> before closing tag if it was bold styled
             if self.bold_tag_stack and self.bold_tag_stack[-1] == tag:
@@ -436,6 +459,28 @@ def clean_html(html, config):
         result = re.sub(r'(</' + block_tags + r'>)\s+(<)', r'\1\2', result)
         result = re.sub(r'(>)\s+(</?' + block_tags + r')', r'\1\2', result)
 
+    result = result.strip()
+
+    # Convert div markers to paragraphs (do this before line cleanup)
+    result = re.sub(r'<!--DIV_START-->(.*?)<!--DIV_END-->', lambda m: '<p>{}</p>'.format(m.group(1).strip()) if m.group(1).strip() else '', result, flags=re.DOTALL)
+    # Clean up any remaining div markers
+    result = re.sub(r'<!--DIV_START-->', '', result)
+    result = re.sub(r'<!--DIV_END-->', '', result)
+
+    # Final cleanup pass: trim each line and normalize paragraph spacing
+    lines = result.split('\n')
+    lines = [line.strip() for line in lines]  # Trim leading/trailing whitespace from each line
+    result = '\n'.join(lines)
+    # Normalize multiple blank lines to single blank line
+    result = re.sub(r'\n{3,}', '\n\n', result)
+    # Remove whitespace/newlines immediately after opening <p> and before closing </p>
+    result = re.sub(r'<p>\s+', '<p>', result)
+    result = re.sub(r'\s+</p>', '</p>', result)
+    # Remove any remaining empty <p> tags (including ones with only whitespace or &nbsp;)
+    result = re.sub(r'<p>\s*</p>\n*', '', result)
+    result = re.sub(r'<p>(\s*&nbsp;\s*)*</p>\n*', '', result)
+    # Remove dangling <p> tags at the start (no content before next tag or end)
+    result = re.sub(r'^<p>\s*\n', '', result)
     result = result.strip()
 
     # Build header with title, pretexts and links
