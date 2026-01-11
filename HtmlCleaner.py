@@ -85,6 +85,8 @@ class HtmlCleanerParser(HTMLParser):
         self.pretext_content = []  # Collect pretext content temporarily
         self.pretexts = []  # Store all found pretexts
         self.bold_tag_stack = []  # Track tags that have font-weight: bold
+        self.links = []  # Store unique URLs in order found
+        self.link_set = set()  # Track seen URLs for deduplication
 
     def _is_hidden_pretext(self, attrs):
         """Check if element has CSS indicating hidden pretext."""
@@ -175,6 +177,21 @@ class HtmlCleanerParser(HTMLParser):
         if tag not in self.config["keep_tags"]:
             return  # Unwrap: skip tag but content will still come through
 
+        # Handle anchor tags specially - extract URL and use [link] tags
+        if tag == "a":
+            href = None
+            for name, value in attrs:
+                if name == "href":
+                    href = value
+                    break
+            if href:
+                # Add to unique links list
+                if href not in self.link_set:
+                    self.link_set.add(href)
+                    self.links.append(href)
+            self.output.append("[link]")
+            return
+
         # Filter attributes
         filtered_attrs = self._filter_attributes(tag, attrs)
 
@@ -248,6 +265,10 @@ class HtmlCleanerParser(HTMLParser):
 
         # Only output end tag if we're keeping this tag
         if tag in self.config["keep_tags"]:
+            # Handle anchor tags specially
+            if tag == "a":
+                self.output.append("[/link]")
+                return
             # Close </b> before closing tag if it was bold styled
             if self.bold_tag_stack and self.bold_tag_stack[-1] == tag:
                 self.output.append("</b>")
@@ -316,6 +337,9 @@ class HtmlCleanerParser(HTMLParser):
     def get_pretexts(self):
         return self.pretexts
 
+    def get_links(self):
+        return self.links
+
 
 def convert_cells_to_paragraphs(html):
     """Convert table cell markers to paragraph tags, avoiding duplicates."""
@@ -341,6 +365,7 @@ def clean_html(html, config):
         parser.feed(html)
         result = parser.get_output()
         pretexts = parser.get_pretexts()
+        links = parser.get_links()
     except Exception as e:
         sublime.error_message("HTML Cleaner: Parse error - {}".format(e))
         return html
@@ -385,10 +410,23 @@ def clean_html(html, config):
 
     result = result.strip()
 
-    # Prepend pretexts at the very top with blank lines after
+    # Build header with pretexts and links
+    header_parts = []
+
+    # Add pretexts first
     if pretexts:
         pretext_block = "\n".join("Pretext: {}".format(p) for p in pretexts)
-        result = pretext_block + "\n\n\n" + result
+        header_parts.append(pretext_block)
+
+    # Add unique links after pretexts
+    if links:
+        links_block = "Links:\n" + "\n".join(links)
+        header_parts.append(links_block)
+
+    # Prepend header to result
+    if header_parts:
+        header = "\n\n".join(header_parts)
+        result = header + "\n\n\n" + result
 
     return result
 
