@@ -30,7 +30,7 @@ CONFIG = {
         # Headings
         "h1", "h2", "h3", "h4", "h5", "h6",
         # Inline formatting
-        "strong", "b", "em", "i", "u", "s", "strike",
+        "strong", "b", "em", "i", "s", "strike",
         # Links and images
         "a", "img",
         # Lists
@@ -64,7 +64,7 @@ CONFIG = {
     "remove_data_attributes": True,
     "remove_empty_tags": True,
     "remove_comments": True,
-    "convert_b_to_strong": True,      # <b> -> <strong>, <i> -> <em>
+    "convert_b_to_strong": False,     # <b> -> <strong>, <i> -> <em>
     "remove_successive_nbsp": True,   # Multiple &nbsp; -> single space
     "remove_span_tags": True,         # Unwrap <span> tags
     "preserve_line_breaks": True,     # Keep some structure in output
@@ -87,6 +87,9 @@ class HtmlCleanerParser(HTMLParser):
         self.bold_tag_stack = []  # Track tags that have font-weight: bold
         self.links = []  # Store unique URLs in order found
         self.link_set = set()  # Track seen URLs for deduplication
+        self.title = None  # Store document title
+        self.in_title = False  # Track if we're inside a title tag
+        self.title_content = []  # Collect title content
 
     def _is_hidden_pretext(self, attrs):
         """Check if element has CSS indicating hidden pretext."""
@@ -131,6 +134,11 @@ class HtmlCleanerParser(HTMLParser):
         return width_1 and height_1
 
     def handle_starttag(self, tag, attrs):
+        # Handle title tag specially (extract before any skip logic)
+        if tag == "title" and self.title is None:
+            self.in_title = True
+            return
+
         # Check if we're inside a tag being removed entirely
         if self.skip_depth > 0:
             if tag in self.config["remove_with_content"]:
@@ -223,6 +231,13 @@ class HtmlCleanerParser(HTMLParser):
         self.handle_starttag(tag, attrs)
 
     def handle_endtag(self, tag):
+        # Handle title tag closing
+        if tag == "title" and self.in_title:
+            self.in_title = False
+            self.title = "".join(self.title_content).strip()
+            self.title_content = []
+            return
+
         # Handle skip depth for removed tags
         if self.skip_depth > 0:
             if tag in self.config["remove_with_content"]:
@@ -276,6 +291,9 @@ class HtmlCleanerParser(HTMLParser):
             self.output.append("</{}>".format(tag))
 
     def handle_data(self, data):
+        if self.in_title:
+            self.title_content.append(data)
+            return
         if self.skip_depth > 0:
             return
         if self.pretext_depth > 0:
@@ -340,6 +358,9 @@ class HtmlCleanerParser(HTMLParser):
     def get_links(self):
         return self.links
 
+    def get_title(self):
+        return self.title
+
 
 def convert_cells_to_paragraphs(html):
     """Convert table cell markers to paragraph tags, avoiding duplicates."""
@@ -349,12 +370,18 @@ def convert_cells_to_paragraphs(html):
         content = match.group(1).strip()
         if not content:
             return ''
-        # Check if content already starts with a p tag
+        # Check if content already has a p tag wrapping it
         if re.match(r'^<p(\s|>)', content, re.IGNORECASE):
             return content
         return '<p>{}</p>'.format(content)
 
-    return re.sub(pattern, replace_cell, html, flags=re.DOTALL)
+    result = re.sub(pattern, replace_cell, html, flags=re.DOTALL)
+
+    # Clean up any remaining markers (in case of malformed/nested tables)
+    result = re.sub(r'<!--CELL_START-->', '', result)
+    result = re.sub(r'<!--CELL_END-->', '', result)
+
+    return result
 
 
 def clean_html(html, config):
@@ -364,6 +391,7 @@ def clean_html(html, config):
     try:
         parser.feed(html)
         result = parser.get_output()
+        title = parser.get_title()
         pretexts = parser.get_pretexts()
         links = parser.get_links()
     except Exception as e:
@@ -396,24 +424,28 @@ def clean_html(html, config):
         # Collapse all whitespace
         result = re.sub(r'\s+', ' ', result)
 
-    # Clean up extra spaces
+    # Clean up extra spaces (but preserve spaces around inline tags)
     result = re.sub(r' +', ' ', result)
+    # Only remove spaces between block-level tags, not inline tags like <b>, <i>, <em>, <strong>, <a>, etc.
+    block_tags = r'(?:p|div|h[1-6]|tr|li|ul|ol|table|blockquote|br|hr|img)'
     if config["preserve_line_breaks"]:
-        # Remove spaces between tags but keep newlines
-        result = re.sub(r'>[ \t]+<', '><', result)
-        result = re.sub(r'>[ \t]+', '>', result)
-        result = re.sub(r'[ \t]+<', '<', result)
+        # Remove spaces between block tags but keep newlines
+        result = re.sub(r'(</' + block_tags + r'>)[ \t]+(<)', r'\1\2', result)
+        result = re.sub(r'(>)[ \t]+(</?' + block_tags + r')', r'\1\2', result)
     else:
-        result = re.sub(r'>\s+<', '><', result)
-        result = re.sub(r'>\s+', '> ', result)
-        result = re.sub(r'\s+<', ' <', result)
+        result = re.sub(r'(</' + block_tags + r'>)\s+(<)', r'\1\2', result)
+        result = re.sub(r'(>)\s+(</?' + block_tags + r')', r'\1\2', result)
 
     result = result.strip()
 
-    # Build header with pretexts and links
+    # Build header with title, pretexts and links
     header_parts = []
 
-    # Add pretexts first
+    # Add title first
+    if title:
+        header_parts.append("Title: {}".format(title))
+
+    # Add pretexts
     if pretexts:
         pretext_block = "\n".join("Pretext: {}".format(p) for p in pretexts)
         header_parts.append(pretext_block)
