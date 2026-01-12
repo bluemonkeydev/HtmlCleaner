@@ -513,31 +513,46 @@ def clean_html(html, config):
     result = re.sub(r'^\s*</p>\s*\n', '', result)
     # Add blank line between consecutive paragraphs
     result = re.sub(r'(</p>)\n(<p>)', r'\1\n\n\2', result)
+    # Center paragraphs that contain only an image (with or without bold/link wrappers)
+    result = re.sub(r'<p>\s*<b>\s*(\[link\]<img [^>]+/>\[/link\])\s*</b>\s*</p>', r'<p align="center">\1</p>', result)
+    result = re.sub(r'<p>\s*<b>\s*(<img [^>]+/>)\s*</b>\s*</p>', r'<p align="center">\1</p>', result)
+    result = re.sub(r'<p>(\s*\[link\]<img [^>]+/>\[/link\]\s*)</p>', r'<p align="center">\1</p>', result)
+    result = re.sub(r'<p>(\s*<img [^>]+/>\s*)</p>', r'<p align="center">\1</p>', result)
     result = result.strip()
 
-    # Build header with title, pretexts and links
+    # Build header with links, title, pretexts
     header_parts = []
 
-    # Add title first
-    if title:
-        header_parts.append("Title: {}".format(title))
-
-    # Add pretexts
-    if pretexts:
-        pretext_block = "\n".join("Pretext: {}".format(p) for p in pretexts)
-        header_parts.append(pretext_block)
-
-    # Add unique links after pretexts
+    # Add links first
     if links:
         links_block = "Links:\n" + "\n".join(links)
         header_parts.append(links_block)
+
+    # Add title
+    if title:
+        header_parts.append("Title:\n{}".format(title))
+
+    # Add pretexts
+    if pretexts:
+        pretext_block = "\n".join("Pretext:\n{}".format(p) for p in pretexts)
+        header_parts.append(pretext_block)
+
+    # Store body before prepending header
+    body = result.strip()
 
     # Prepend header to result
     if header_parts:
         header = "\n\n".join(header_parts)
         result = header + "\n\n\n" + result
 
-    return result
+    # Return result and components for clipboard
+    return {
+        "result": result,
+        "body": body,
+        "pretext": pretexts[0] if pretexts else None,
+        "title": title,
+        "first_link": links[0] if links else None,
+    }
 
 
 # =============================================================================
@@ -555,14 +570,54 @@ class HtmlCleanerCommand(sublime_plugin.TextCommand):
             # No selection - clean entire file
             region = sublime.Region(0, self.view.size())
             original = self.view.substr(region)
-            cleaned = clean_html(original, CONFIG)
-            self.view.replace(edit, region, cleaned)
+            clean_result = clean_html(original, CONFIG)
+            self.view.replace(edit, region, clean_result["result"])
+            self._copy_to_clipboard_history(clean_result)
             sublime.status_message("HTML Cleaner: Cleaned entire file")
         else:
-            # Clean each selection
+            # Clean each selection (use last selection for clipboard)
+            last_result = None
             for i, sel in enumerate(reversed(selections)):
                 if not sel.empty():
                     original = self.view.substr(sel)
-                    cleaned = clean_html(original, CONFIG)
-                    self.view.replace(edit, sel, cleaned)
+                    clean_result = clean_html(original, CONFIG)
+                    self.view.replace(edit, sel, clean_result["result"])
+                    last_result = clean_result
+            if last_result:
+                self._copy_to_clipboard_history(last_result)
             sublime.status_message("HTML Cleaner: Cleaned {} selection(s)".format(len(selections)))
+
+    def _copy_to_clipboard_history(self, clean_result):
+        """Copy items to clipboard history (Win+V shows: title, pretext, body, link).
+        Ctrl+V pastes the most recent item (link if exists, otherwise body)."""
+        import subprocess
+
+        # Build list in order: link, body, pretext, title
+        # (reversed so Win+V shows: title, pretext, body, link from top to bottom)
+        items = []
+        if clean_result["first_link"]:
+            items.append(clean_result["first_link"])
+        if clean_result["body"]:
+            items.append(clean_result["body"])
+        if clean_result["pretext"]:
+            items.append(clean_result["pretext"])
+        if clean_result["title"]:
+            items.append(clean_result["title"])
+
+        # Copy items using clip.exe which properly triggers clipboard history
+        def copy_next(index):
+            if index < len(items):
+                try:
+                    process = subprocess.Popen(
+                        ['clip.exe'],
+                        stdin=subprocess.PIPE,
+                        creationflags=subprocess.CREATE_NO_WINDOW
+                    )
+                    process.communicate(input=items[index].encode('utf-8'))
+                except Exception:
+                    sublime.set_clipboard(items[index])
+                sublime.set_timeout(lambda: copy_next(index + 1), 400)
+
+        if items:
+            copy_next(0)
+            
