@@ -604,16 +604,19 @@ class HtmlCleanerCommand(sublime_plugin.TextCommand):
         if clean_result["title"]:
             items.append(clean_result["title"])
 
-        # Copy items using clip.exe which properly triggers clipboard history
+        # Copy items using PowerShell Set-Clipboard for proper Unicode support
         def copy_next(index):
             if index < len(items):
                 try:
+                    # Use PowerShell Set-Clipboard with -Value parameter
+                    # Escape single quotes by doubling them
+                    escaped = items[index].replace("'", "''")
                     process = subprocess.Popen(
-                        ['clip.exe'],
-                        stdin=subprocess.PIPE,
+                        ['powershell', '-NoProfile', '-Command',
+                         "Set-Clipboard -Value '{}'".format(escaped)],
                         creationflags=subprocess.CREATE_NO_WINDOW
                     )
-                    process.communicate(input=items[index].encode('utf-8'))
+                    process.wait()
                 except Exception:
                     sublime.set_clipboard(items[index])
                 sublime.set_timeout(lambda: copy_next(index + 1), 400)
