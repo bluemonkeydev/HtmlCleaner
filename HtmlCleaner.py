@@ -513,11 +513,33 @@ def clean_html(html, config):
     result = re.sub(r'^\s*</p>\s*\n', '', result)
     # Add blank line between consecutive paragraphs
     result = re.sub(r'(</p>)\n(<p>)', r'\1\n\n\2', result)
+    # Split </p><p> onto separate lines (before centering rules)
+    result = re.sub(r'</p><p>', '</p>\n\n<p>', result)
     # Center paragraphs that contain only an image (with or without bold/link wrappers)
     result = re.sub(r'<p>\s*<b>\s*(\[link\]<img [^>]+/>\[/link\])\s*</b>\s*</p>', r'<p align="center">\1</p>', result)
     result = re.sub(r'<p>\s*<b>\s*(<img [^>]+/>)\s*</b>\s*</p>', r'<p align="center">\1</p>', result)
     result = re.sub(r'<p>(\s*\[link\]<img [^>]+/>\[/link\]\s*)</p>', r'<p align="center">\1</p>', result)
     result = re.sub(r'<p>(\s*<img [^>]+/>\s*)</p>', r'<p align="center">\1</p>', result)
+    # For centered images in the first half of document, change width="200" to width="450"
+    midpoint = len(result) // 2
+    first_half = result[:midpoint]
+    second_half = result[midpoint:]
+    first_half = re.sub(r'(<p align="center"[^>]*>)(<img [^>]*?)width="200"([^>]*/>)</p>', r'\1[link]\2width="450"\3[/link]</p>', first_half)
+    result = first_half + second_half
+    # For plain paragraph images in the first 80% of document, center and wrap with [link]
+    cutoff = int(len(result) * 0.8)
+    first_part = result[:cutoff]
+    second_part = result[cutoff:]
+    first_part = re.sub(r'<p>(<img [^>]+/>)</p>', r'<p align="center">[link]\1[/link]</p>', first_part)
+    result = first_part + second_part
+    # Wrap unwrapped [link]<img>[/link] on their own line in a centered paragraph
+    # Also handle case with dangling </p>
+    result = re.sub(r'^(\[link\]<img [^>]+/>\[/link\])</p>\s*$', r'<p align="center">\1</p>', result, flags=re.MULTILINE)
+    result = re.sub(r'^(\[link\]<img [^>]+/>\[/link\])\s*$', r'<p align="center">\1</p>', result, flags=re.MULTILINE)
+    # Normalize spacing: exactly one blank line between </p> and <p>
+    result = re.sub(r'(</p>)\s*\n\s*(<p)', r'\1\n\n\2', result)
+    # Collapse multiple blank lines to single blank line
+    result = re.sub(r'\n{3,}', '\n\n', result)
     result = result.strip()
 
     # Build header with links, title, pretexts
